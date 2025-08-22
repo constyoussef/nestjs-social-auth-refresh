@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { compare } from 'bcryptjs';
+import { compare, hash } from 'bcryptjs';
 import { Response } from 'express';
 import { User } from '../users/schema/user.schema';
 import { UsersService } from '../users/users.service';
@@ -15,13 +15,23 @@ export class AuthService {
     private readonly jwtService: JwtService,
   ) {}
 
-  login(user: User, response: Response) {
+  async login(user: User, response: Response) {
     const expiresAcessToken = new Date();
     expiresAcessToken.setMilliseconds(
       expiresAcessToken.getTime() +
         parseInt(
           this.configService.getOrThrow<string>(
             'JWT_ACCESS_TOKEN_EXPIRATION_MS',
+          ),
+        ),
+    );
+
+    const expiresRefreshToken = new Date();
+    expiresRefreshToken.setMilliseconds(
+      expiresRefreshToken.getTime() +
+        parseInt(
+          this.configService.getOrThrow<string>(
+            'JWT_REFRESH_TOKEN_EXPIRATION_MS',
           ),
         ),
     );
@@ -35,11 +45,33 @@ export class AuthService {
         'JWT_ACCESS_TOKEN_EXPIRATION_MS',
       )}ms`,
     });
+    const refreshToken = this.jwtService.sign(tokenPayload, {
+      secret: this.configService.getOrThrow<string>('JWT_REFRESH_TOKEN_SECRET'),
+      expiresIn: `${this.configService.getOrThrow<string>(
+        'JWT_REFRESH_TOKEN_EXPIRATION_MS',
+      )}ms`,
+    });
+
+    await this.userService.updateUser(
+      {
+        _id: user._id,
+      },
+      {
+        $set: {
+          refreshToken: await hash(refreshToken, 10),
+        },
+      },
+    );
 
     response.cookie('access_token', accessToken, {
       httpOnly: true,
       secure: this.configService.get('NODE_ENV') === 'production',
       expires: expiresAcessToken,
+    });
+    response.cookie('refresh_token', refreshToken, {
+      httpOnly: true,
+      secure: this.configService.get('NODE_ENV') === 'production',
+      expires: expiresRefreshToken,
     });
   }
 
@@ -56,6 +88,24 @@ export class AuthService {
     } catch (error) {
       console.log(error);
       throw new UnauthorizedException('Invalid credentials');
+    }
+  }
+
+  async verifyUserRefreshToken(refreshToken: string, userId: string) {
+    try {
+      const user = await this.userService.getUser({ _id: userId });
+
+      if (!user.refreshToken) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+      const authenticated = await compare(refreshToken, user.refreshToken);
+      if (!authenticated) {
+        throw new UnauthorizedException();
+      }
+      return user;
+    } catch (error) {
+      console.log(error);
+      throw new UnauthorizedException('Refresh token is invalid');
     }
   }
 }
